@@ -1,0 +1,209 @@
+---
+title: "ProyectoRairbnbMachineLearning"
+author: "Francisco Clemente Fernández"
+date: "2024-09-01"
+output:
+  pdf_document:
+    latex_engine: pdflatex
+    keep_tex: true  # Esto guarda el archivo .tex para revisiónpdf_document: default
+  html_document: default
+  geometry: "margin=1in"  # Ajusta los márgenes a 1 pulgada
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r}
+airbnb <- read.csv('airbnb-listings.csv', sep = ';')
+options(repr.plot.height=4, repr.plot.width=6, repr.plot.res = 300)
+```
+
+<font size="5">**Selecciono las columnas con la información más importante**</font>
+
+```{r}
+library(tidyverse)
+
+df_madrid <- airbnb[airbnb$City == "Madrid" & airbnb$Room.Type == "Entire home/apt" & airbnb$Neighbourhood != "", ]
+df_madrid <- df_madrid[, c("Neighbourhood", "Accommodates", "Bathrooms", "Bedrooms", "Beds", "Price", "Square.Feet", "Guests.Included", "Extra.People", "Review.Scores.Rating", "Latitude", "Longitude")]
+
+print(head(df_madrid, 10))
+```
+
+<font size="5">**Realizo una conversión de pies cuadrados a metros cuadrados para poder hacer los cálculos más adelante**</font>
+
+```{r}
+df_madrid$Square.Meters <- df_madrid$Square.Feet * 0.092903
+
+print(head(df_madrid, 10))
+```
+
+<font size="5">**Miro qué porcentaje de pisos no tienen la información de metros cuadrados** </font>
+
+```{r}
+sum(is.na(df_madrid$Square.Meters))
+
+percentage_na <- df_madrid |> summarize(percentage_na = mean(is.na(Square.Meters)) * 100)
+print(percentage_na)
+```
+
+<font size="5">**Miro qué porcentaje de pisos tienen 0 metros cuadrados**</font>
+
+```{r}
+length(which(df_madrid$Square.Meters == 0))
+df_madrid$Square.Meters[df_madrid$Square.Meters == 0] <- NA
+
+print(head(df_madrid, 10))
+```
+
+<font size="5">**Pinto el histograma de los metros cuadrados para ver si tengo que filtrar algún elemento más**</font>
+
+```{r}
+library(ggplot2)
+
+ggplot(df_madrid, aes(x = Square.Meters)) + geom_histogram()
+```
+
+<font size="5">**Asigno el valor NA a la columna Square.Meters de los apartamentos que tengan menos de 20 m\^2**</font>
+
+```{r}
+df_madrid$Square.Meters[df_madrid$Square.Meters <= 20] <- NA
+
+print(head(df_madrid, 10))
+```
+
+<font size="5">**Existen varios barrios donde todas las entradas de Square.Meters son NA, vamos a eliminar del dataset todos los pisos que pertenecen a estos barrios.**</font>
+
+```{r}
+library(dplyr)
+
+df_num_na <- df_madrid |> group_by(Neighbourhood) |> summarise(num_NA = sum(is.na(Square.Meters)), num_total = n())
+barrios_na_completos <- df_num_na |> filter(num_NA == num_total) |> pull(Neighbourhood)
+df_madrid <- df_madrid |> filter(!Neighbourhood %in% barrios_na_completos)
+
+print(head(df_madrid, 10))
+```
+
+<font size="5">**Compruebo si todos los barrios tienen los mismos metros cuadrados de media**</font>
+
+```{r}
+test_saphiro <- shapiro.test(df_madrid$Square.Meters)
+print(test_saphiro)
+
+test_anova <- summary(aov(Square.Meters ~ Neighbourhood, data = df_madrid))
+print(test_anova)
+```
+
+<font size="5">**Agrupo los barrios por metros cuadrados usando una matriz de similaridad de Tukey, mostrando las similitudes y diferencias de los barrios.**</font>
+
+```{r}
+tky <- TukeyHSD(aov(Square.Meters ~ Neighbourhood, data = df_madrid))
+tky.result <- data.frame(tky$Neighbourhood)
+cn <- sort(unique(df_madrid$Neighbourhood))
+resm <- matrix(NA, length(cn), length(cn))
+rownames(resm) <- cn
+colnames(resm) <- cn
+resm[lower.tri(resm)] <- round(tky.result$p.adj, 4)
+resm[upper.tri(resm)] <- t(resm)[upper.tri(resm)]
+diag(resm) <- 1
+```
+
+<font size="5">**En el punto anterior he creado una matriz de p-valores que indica que parecidos son dos barrios. Si el P-valor es alto, significa que los barrios son diferentes; si es bajo, significa que los barrios se parecen. Esta matriz la podemos usar como matriz de distancia si restamos el P-valor a 1. Es decir, si usamos como distancia 1 - p-valor. De esta forma, barrios con un p-valor alto tendrán una distancia mayor que aquellos con un p-valor bajo. Voy a crear una nueva columna en el dataframe con un nuevo identificador marcado por los clusters obtenidos.**</font>
+
+```{r}
+resm.dist <- as.dist(1 - abs(resm))
+str(resm.dist)
+
+resm.tree <- hclust(resm.dist, method = "complete")
+resm.dend <- as.dendrogram(resm.tree)
+
+library(dendextend)
+
+clusters <- cutree(resm.dend, h = 0.3)
+plot(color_branches(resm.dend, h = 0.3), leaflab = "none")
+abline(h = 0.3, col = "purple", lty = 3)
+
+library(cluster)
+ss <- silhouette(clusters, resm.dist)
+plot(ss, col = 1:max(clusters), border = NA, main = "Silhouette Plot")
+
+df_clusters <- data.frame(Neighbourhood = names(clusters), Cluster = clusters)
+df_madrid <- merge(df_madrid, df_clusters, by = "Neighbourhood")
+names(df_madrid)[names(df_madrid) == "Cluster"] <- "neighb_id"
+
+print(head(df_madrid, 10))
+```
+
+<font size="5">**Voy a crear dos grupos, uno test y otro train.**</font>
+
+```{r}
+train_proportion <- 0.7
+train_index <- sample(seq_len(nrow(df_madrid)), size = train_proportion * nrow(df_madrid))
+
+train_df_madrid <- df_madrid[train_index, ]
+test_df_madrid <- df_madrid[-train_index, ]
+
+print(head(train_df_madrid, 10))
+print(head(test_df_madrid, 10))
+```
+
+<font size="5">**Paso a predecir los metros cuadrados en función del resto de columnas del dataframe.**</font>
+
+```{r}
+df_madrid_filtrado <- df_madrid |> select(-Neighbourhood)
+formula <- as.formula("Square.Meters ~ Bathrooms + Price + Bedrooms")
+model <- lm(formula, data = df_madrid_filtrado)
+summary(model)
+```
+
+<font size="5">**Evaluo la calidad del modelo**</font>
+
+```{r}
+# Diagnóstico de los residuos
+plot(model$fitted.values, model$residuals, xlab = "Valores Ajustados", ylab = "Residuos", main = "Residuos vs. Valores Ajustados")
+abline(h = 0, col = "purple")
+hist(model$residuals, xlab = "Residuos", main = "Histograma de Residuos")
+qqnorm(model$residuals)
+qqline(model$residuals, col = "purple")
+
+# Medidas de ajuste del modelo
+predicciones <- predict(model, newdata = df_madrid_filtrado)
+errores <- predicciones - df_madrid_filtrado$Square.Meters
+mse <- mean(errores^2)
+rmse <- sqrt(mse)
+mae <- mean(abs(errores))
+
+print(paste("MSE:", mse))
+print(paste("RMSE:", rmse))
+print(paste("MAE:", mae))
+r_squared <- summary(model)$r.squared
+print(paste("R-squared:", r_squared))
+```
+
+<font size="5">**Si tuviéramos un anuncio de un apartamento para 6 personas (Accommodates), con 1 baño, un precio de 50€/noche y 3 habitaciones en el barrio de Sol, con 4 camas y un review de 80, ¿cuántos metros cuadrados tendría? Vamos a probar cómo funciona el modelo con el ejemplo.**</font>
+
+```{r}
+predict(model, data.frame(Bathrooms = 1, Price = 50, Bedrooms = 4))
+```
+
+<font size="15">**FIN.**</font>
